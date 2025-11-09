@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CuraMatch Resilience Dashboard</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Use Inter font family -->
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f7fafc; }
+    </style>
+    <!-- Load Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query, limit, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- GLOBAL FIREBASE/APP VARIABLES ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-curamatch-app-id';
+        // Check if config exists, otherwise set to null
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        let db;
+        let auth;
+        let userId = `anon-local-${crypto.randomUUID()}`; // Default to a local ID
+        let isAuthReady = false;
+        let isFirebaseActive = false; // New flag to track if saving is possible
+
+        // Set log level for debugging
+        setLogLevel('Debug');
+
+        // Resilience Questions (Simplified scoring for the example)
+        const QUESTIONS = [
+            { id: 'q1', text: "I can usually handle stress well.", category: "Emotional" },
+            { id: 'q2', text: "I have strong social support from friends or family.", category: "Social" },
+            { id: 'q3', text: "I manage my work/life balance effectively.", category: "Professional" },
+            { id: 'q4', text: "I bounce back quickly after setbacks.", category: "Adaptability" },
+            { id: 'q5', text: "I have clear, positive goals for the future.", category: "Vision" }
+        ];
+
+        window.QUESTIONS = QUESTIONS; // Expose to global scope for use in the HTML
+
+        // --- UTILITY: EXPONENTIAL BACKOFF FOR RETRIES ---
+        // Helps mitigate intermittent network failures during sign-in
+        const retryWithBackoff = async (fn, maxRetries = 4, delay = 1000) => {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    return await fn();
+                } catch (error) {
+                    // Check if it's the last attempt OR if it's not a network-related failure we want to retry.
+                    // We only retry for auth/network-request-failed.
+                    if (i === maxRetries - 1 || !error.code.includes('auth/network-request-failed')) {
+                        throw error; 
+                    }
+                    console.warn(`Auth failed (attempt ${i + 1}/${maxRetries}) due to network error, retrying in ${delay / 1000}s...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    delay *= 2; // Exponential backoff
+                }
+            }
+        };
+
+        // --- DOM MANIPULATION FUNCTIONS ---
+
+        const generateQuestions = () => {
+            const container = document.getElementById('questions-container');
+            if (!container) return; // Safety check
+
+            // Use window.QUESTIONS as it is guaranteed to be available here
+            window.QUESTIONS.forEach((q, index) => {
+                const questionHtml = `
+                    <div class="p-5 border border-gray-200 rounded-xl shadow-sm hover:shadow-md transition-shadow duration-300 bg-white">
+                        <label class="block text-lg font-medium text-gray-700 mb-4">
+                            Q${index + 1}. ${q.text} 
+                            <span class="text-xs font-normal text-indigo-500 ml-2">(${q.category})</span>
+                        </label>
+                        <div class="flex flex-wrap justify-between space-y-2 sm:space-y-0 sm:space-x-2">
+                            ${[1, 2, 3, 4, 5].map(val => `
+                                <div class="flex items-center w-full sm:w-auto">
+                                    <input id="${q.id}-${val}" type="radio" name="${q.id}" value="${val}" required
+                                        class="h-5 w-5 text-indigo-600 border-gray-300 focus:ring-indigo-500 cursor-pointer">
+                                    <label for="${q.id}-${val}" class="ml-2 text-sm font-medium text-gray-600 cursor-pointer">
+                                        ${val} (${val === 1 ? 'Disagree' : val === 5 ? 'Agree' : ''})
+                                    </label>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+                container.insertAdjacentHTML('beforeend', questionHtml);
+            });
+        };
+
+        // --- FIREBASE INITIALIZATION AND AUTHENTICATION ---
+        const initFirebase = async () => {
+            // Check for missing config first (the fix for the user's reported error)
+            if (!firebaseConfig) {
+                console.warn("Firebase configuration is missing. History saving is disabled.");
+                document.getElementById('status-message').textContent = "⚠️ Warning: History saving disabled (requires execution environment).";
+                document.getElementById('status-message').classList.add('text-red-500', 'font-semibold');
+                document.getElementById('user-id-display').textContent = `User ID (Local Only): ${userId}`;
+                isAuthReady = true; // Mark as ready to avoid blocking UI, but saving flag is false.
+                return;
+            }
+            
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Define the sign-in function to retry
+                const signInFn = initialAuthToken 
+                    ? () => signInWithCustomToken(auth, initialAuthToken)
+                    : () => signInAnonymously(auth);
+
+                // Use retryWithBackoff for robust sign-in
+                await retryWithBackoff(signInFn, 4); 
+                
+                // Wait for auth state change
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
+                        isAuthReady = true;
+                        isFirebaseActive = true; // Set flag to true only upon successful auth
+                        console.log("Firebase Auth successful. User ID:", userId);
+                        // Once authenticated, start loading history
+                        loadHistory(userId); 
+                    } else {
+                        // This case should be rare in the canvas environment
+                        document.getElementById('status-message').textContent = "Authentication failed. Saving is disabled.";
+                        isAuthReady = true;
+                        isFirebaseActive = false;
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase Initialization or Authentication Error:", error);
+                document.getElementById('status-message').textContent = `Error: Authentication failed. ${error.message}`;
+                document.getElementById('status-message').classList.add('text-red-500', 'font-semibold');
+                // Even on failure, mark auth ready but disable saving
+                isAuthReady = true; 
+                isFirebaseActive = false;
+            }
+        };
+
+        
+        // --- FIRESTORE DATA FUNCTIONS ---
+
+        const getScoreCollectionRef = (uid) => {
+            // Private data path: /artifacts/{appId}/users/{userId}/resilience_scores
+            return collection(db, `artifacts/${appId}/users/${uid}/resilience_scores`);
+        };
+
+        const saveScore = async (score) => {
+            // Check if Firebase is active before attempting to save
+            if (!isFirebaseActive || !userId) {
+                showModal("Saving Disabled", "The history record could not be saved because Firebase is not fully initialized. Please ensure the file is running in the correct environment.");
+                document.getElementById('status-message').textContent = "⚠️ Warning: Score not saved.";
+                return;
+            }
+
+            const timestamp = Date.now();
+            const dateStr = new Date(timestamp).toLocaleString();
+            
+            try {
+                // Use the current timestamp as the document ID for uniqueness
+                await setDoc(doc(getScoreCollectionRef(userId), String(timestamp)), {
+                    score: score,
+                    date: dateStr,
+                    timestamp: timestamp
+                });
+                console.log("Score saved successfully:", score);
+                document.getElementById('status-message').textContent = `Score saved: ${score}% on ${dateStr}`;
+                document.getElementById('status-message').classList.remove('text-red-500', 'font-semibold'); // Clear warning color
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showModal("Database Error", `Failed to save score. Please check console for details.`);
+            }
+        };
+
+        const loadHistory = (uid) => {
+            if (!isFirebaseActive || !db) return;
+
+            const q = query(
+                getScoreCollectionRef(uid), 
+                // Order by timestamp descending and limit to 5 recent scores
+                orderBy("timestamp", "desc"), 
+                limit(5) 
+            );
+
+            // Real-time listener
+            onSnapshot(q, (snapshot) => {
+                const historyList = document.getElementById('history-list');
+                historyList.innerHTML = ''; // Clear existing list
+                
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    const li = document.createElement('li');
+                    li.className = 'flex justify-between items-center py-2 border-b last:border-b-0';
+                    li.innerHTML = `
+                        <span class="font-medium text-gray-700">${data.date}</span>
+                        <span class="text-lg font-bold ${data.score > 75 ? 'text-green-600' : data.score > 50 ? 'text-yellow-600' : 'text-red-600'}">${data.score}%</span>
+                    `;
+                    historyList.appendChild(li);
+                });
+
+                if (snapshot.empty) {
+                    historyList.innerHTML = '<li class="text-center text-gray-500 py-4">No scores recorded yet.</li>';
+                }
+            }, (error) => {
+                console.error("Error loading history: ", error);
+                document.getElementById('history-list').innerHTML = '<li class="text-center text-red-500 py-4">Error loading history.</li>';
+            });
+        };
+
+        // --- APPLICATION LOGIC ---
+
+        window.resetAssessment = () => {
+            // Clear all radio button selections
+            const form = document.getElementById('resilience-form');
+            form.reset();
+
+            // Hide the results section
+            document.getElementById('resilience-result').classList.add('hidden');
+            document.getElementById('status-message').textContent = 'Assessment cleared. Ready for new input.';
+            
+            // Scroll back to the top of the form
+            form.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        window.calculateResilience = () => {
+            if (!isAuthReady) {
+                showModal("Processing...", "Please wait for initialization to complete before submitting.");
+                return;
+            }
+
+            const form = document.getElementById('resilience-form');
+            const data = new FormData(form);
+            let totalScore = 0;
+            const maxScore = QUESTIONS.length * 5; // 5 points per question
+
+            // Check if all questions have been answered
+            let isComplete = true;
+            QUESTIONS.forEach(q => {
+                if (!data.get(q.id)) {
+                    isComplete = false;
+                }
+            });
+
+            if (!isComplete) {
+                showModal("Incomplete Assessment", "Please answer all questions before calculating your score.");
+                return;
+            }
+
+
+            // Calculate total score based on the 1-5 radio button values
+            QUESTIONS.forEach(q => {
+                const value = parseInt(data.get(q.id));
+                if (isNaN(value) || value < 1 || value > 5) {
+                    // This should not happen if form is handled correctly, but good for validation
+                    return; 
+                }
+                totalScore += value;
+            });
+
+            // Calculate percentage score (0-100)
+            const percentageScore = Math.round((totalScore / maxScore) * 100);
+
+            // Display Results
+            const resultElement = document.getElementById('resilience-result');
+            const recommendationElement = document.getElementById('recommendation');
+            const scoreDisplayElement = document.getElementById('score-display');
+            
+            // Apply color classes based on score
+            let scoreColor = 'text-red-600';
+            let recommendationText = 'Your resilience foundation is weak. Focus on building better habits in your lowest scoring areas.';
+
+            if (percentageScore > 75) {
+                scoreColor = 'text-green-600';
+                recommendationText = 'Excellent! Your resilience is strong. Maintain these habits and seek new challenges.';
+            } else if (percentageScore > 50) {
+                scoreColor = 'text-yellow-600';
+                recommendationText = 'Good. You have a solid foundation but could strengthen areas like stress management and work/life balance.';
+            } else if (percentageScore > 25) {
+                scoreColor = 'text-orange-600';
+                recommendationText = 'Needs Attention. Identify the weakest areas and start with small, consistent changes.';
+            }
+
+            // Update the display elements
+            scoreDisplayElement.className = `text-6xl font-extrabold ${scoreColor} transition-all duration-500`;
+            scoreDisplayElement.textContent = `${percentageScore}%`;
+            recommendationElement.textContent = recommendationText;
+
+            // Show result section
+            resultElement.classList.remove('hidden');
+            
+            // Scroll to results
+            resultElement.scrollIntoView({ behavior: 'smooth' });
+
+            // Save the score to Firestore (this check handles the local environment case)
+            saveScore(percentageScore);
+        };
+
+        // --- MODAL UTILITIES (For alerts/confirmations) ---
+        window.showModal = (title, message) => {
+            const modal = document.getElementById('custom-modal');
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-message').textContent = message;
+            modal.classList.remove('hidden');
+        };
+
+        window.closeModal = () => {
+            document.getElementById('custom-modal').classList.add('hidden');
+        };
+
+        // --- ENTRY POINTS ---
+        // 1. Generate questions when the DOM content is fully loaded
+        document.addEventListener('DOMContentLoaded', generateQuestions);
+
+        // 2. Initialize Firebase after the DOM is ready
+        window.onload = initFirebase;
+
+    </script>
+</head>
+<body class="min-h-screen bg-gray-100 p-4 sm:p-8">
+
+    <!-- Custom Modal Structure (Replaces alert/confirm) -->
+    <div id="custom-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+        <div class="bg-white rounded-xl p-6 w-11/12 max-w-md shadow-2xl transition-all duration-300 transform scale-100">
+            <h3 id="modal-title" class="text-xl font-bold text-indigo-700 mb-3"></h3>
+            <p id="modal-message" class="text-gray-700 mb-5"></p>
+            <button onclick="closeModal()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 rounded-lg transition duration-200">
+                OK
+            </button>
+        </div>
+    </div>
+
+    <!-- Main Content Card -->
+    <div class="max-w-4xl mx-auto bg-white shadow-2xl rounded-2xl p-6 sm:p-10">
+        
+        <!-- Header -->
+        <header class="text-center mb-10 border-b pb-4">
+            <h1 class="text-4xl font-extrabold text-indigo-700">CuraMatch AI Resilience Engine</h1>
+            <p class="text-gray-600 mt-2">Assess your mental fortitude and track your progress.</p>
+            <p id="user-id-display" class="text-sm text-gray-400 mt-2">Loading user...</p>
+            <p id="status-message" class="text-sm text-indigo-500 mt-1 h-4"></p>
+        </header>
+
+        <!-- Resilience Assessment Form -->
+        <section class="mb-12">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-6">1. Resilience Assessment</h2>
+            <p class="text-gray-500 mb-8 italic">Rate each statement from 1 (Strongly Disagree) to 5 (Strongly Agree).</p>
+
+            <form id="resilience-form" onsubmit="event.preventDefault(); calculateResilience();">
+                <div id="questions-container" class="space-y-6">
+                    <!-- Questions will be injected here via JavaScript for dynamic generation -->
+                </div>
+
+                <div class="mt-10 flex gap-4">
+                    <button type="button" onclick="resetAssessment()"
+                        class="flex-1 bg-gray-300 hover:bg-gray-400 text-gray-800 font-extrabold text-xl py-4 rounded-xl transition duration-300 transform hover:scale-[1.01] shadow-lg">
+                        Start New Assessment
+                    </button>
+                    <button type="submit" 
+                        class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xl py-4 rounded-xl transition duration-300 transform hover:scale-[1.01] shadow-lg hover:shadow-xl">
+                        Calculate Resilience Score
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <!-- Results Display -->
+        <section id="resilience-result" class="hidden mt-12 pt-8 border-t border-gray-200">
+            <h2 class="text-3xl font-extrabold text-gray-800 mb-6 text-center">2. Your Resilience Score</h2>
+            <div class="text-center p-8 bg-indigo-50 rounded-2xl shadow-inner">
+                <p class="text-xl text-gray-500 mb-4">Overall Resilience:</p>
+                <div id="score-display" class="text-6xl font-extrabold text-indigo-700 transition-all duration-500">
+                    --%
+                </div>
+                <div class="mt-6">
+                    <p class="text-xl font-semibold text-gray-700 mb-2">Recommendation:</p>
+                    <p id="recommendation" class="text-gray-600 max-w-2xl mx-auto"></p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Historical Tracking Section -->
+        <section class="mt-12 pt-8 border-t border-gray-200">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-6 text-center">3. Resilience History</h2>
+            <div class="bg-gray-50 p-6 rounded-xl shadow-inner">
+                <ul id="history-list" class="divide-y divide-gray-200">
+                    <li class="text-center text-gray-500 py-4">Awaiting scores...</li>
+                </ul>
+            </div>
+            <p class="text-sm text-gray-400 mt-4 text-center">Scores are saved and tracked using Google Firestore for persistent history.</p>
+        </section>
+
+    </div>
+</body>
+</html>

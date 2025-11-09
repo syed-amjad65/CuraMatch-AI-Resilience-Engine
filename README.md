@@ -1,47 +1,30 @@
-CuraMatch AI: The Global Resilience Engine
+# CuraMatch-AI Resilience Engine
 
-> **Tagline:** A Prescriptive Analytics System for Ethical Clinical Trial Matching and Real-Time Pandemic/Disaster Resource Allocation.
+## 🚀 Project Overview
+The CuraMatch-AI Resilience Engine is a secure, real-time web application built for personal development and well-being tracking. It uses a structured assessment to calculate an **Overall Resilience Score** across five key domains: Emotional, Social, Professional, Adaptability, and Vision. The application provides immediate, AI-driven recommendations based on the user's results, and securely persists history and scores using Google's **Firestore** database.
 
-## 🌟 Project Status
-**Active Development: Phase 2 - Deep Learning Predictor Training**
+## ✨ Key Features
+* **Real-time Assessment:** Interactive and dynamic scoring of 20+ resilience factors.
+* **AI-Driven Recommendations:** Utilizes the Gemini API to analyze the score and instantly generate a personalized, single-paragraph recommendation for improvement.
+* **Secure History Tracking:** Implements **Firebase Firestore** for persistent, real-time storage of assessment history and scores, utilizing the `__initial_auth_token` for secure user authentication.
+* **Single-File Architecture:** Deployed as a self-contained, fully responsive HTML file, integrating all CSS (Tailwind), JavaScript, and data logic for efficient deployment.
+* **Responsive Design:** Optimized for seamless usage across mobile, tablet, and desktop devices.
 
-This project is currently under active development. Consistent commits reflect the iterative process of building and validating a robust, ethical AI system designed for extreme stress testing (like pandemic-level events).
+## 🛠 Technology Stack
+* **Frontend:** HTML5, Tailwind CSS, Vanilla JavaScript (ES6+)
+* **Database:** Google Firebase Firestore
+* **Authentication:** Firebase Auth (`signInWithCustomToken`)
+* **AI/LLM:** Gemini API (`gemini-2.5-flash-preview-09-2025`) for content generation
 
-## 💡 The Strategic Problem
-The COVID-19 pandemic exposed a critical gap in global infrastructure: the lack of systems that can dynamically switch from optimization (efficiency) to **crisis allocation (survival)**. Current clinical matching systems focus on steady-state operations.
+## ☁️ Database Structure (Firestore)
+The application uses the following secure collection path to store user history:
 
-The **CuraMatch AI** system addresses this by integrating a two-pronged solution:
-
-1.  **Ethical Matching:** Using Deep Learning to reduce systemic bias in trial cohort selection.
-2.  **Resilience Engine:** A framework that detects catastrophic operational anomalies and instantly deploys a prescribed resource allocation plan.
-
-## ⚙️ Core Technical Components (Keywords for Recruiters)
-
-| Component | Technology / Technique | Function |
+| Collection Path | Data Stored | Access Level |
 | :--- | :--- | :--- |
-| **Anomaly Alert Mechanism** | **Keras Autoencoder (Deep Learning)** | Trained on normal operations time-series data (e.g., ICU occupancy, staff rates). Triggers an alert when reconstruction error exceeds the crisis threshold. |
-| **Prescriptive Allocation** | **Google OR-Tools** (Constraint Programming) | Upon alert, the solver re-optimizes hospital resource deployment (staffing, bed space, ventilators) to **maximize patient survival probability** under severe scarcity constraints. |
-| **Bias Mitigation** | **SHAP** (Explainable AI - XAI) | Used to validate and correct demographic and socioeconomic biases introduced during the initial trial matching phase. |
-| **Data Foundation** | **Time-Series Simulation** (Pandas/NumPy) | Generation of synthetic longitudinal data to model realistic hospital operational flows and simulate non-linear collapse events. |
+| `/artifacts/{appId}/users/{userId}/history` | Assessment results (score, date, raw inputs, recommendation text) | Private (User-specific) |
 
-## 📁 Repository Structure
-* `01_data_simulation.ipynb`: Time-Series Data Simulation for Normal Operations.
-* `02_dl_matching_model.ipynb`: Deep Learning Match Predictor (Initial Training).
-* `05_anomaly_detector.ipynb`: Implementation of the Keras Autoencoder Alert System.
-* `05_crisis_optimizer.py`: The Google OR-Tools Prescriptive Solver.
+## ⚙️ Installation and Setup
+This application is designed to run in a secure sandbox environment where the following global variables are injected: `__app_id`, `__firebase_config`, and `__initial_auth_token`.
 
----
-
-## 🔒 Ownership, License, and Contact
-
-### Copyright & Ownership
-This project is proprietary and owned by **Syed Emirates**. While the code is made available under an open-source license for viewing and learning, all rights to the overall design, architecture, and core methodologies are reserved.
-
-### License
-This project is licensed under the **MIT License**. You are free to view, fork, and adapt this code, provided you retain the original copyright and license notice.
-
-### Contact
-For collaboration, commercial inquiries, or to discuss this project, please reach out directly:
-
-* **Email:** syed.emirates686@gmail.com
-* **WhatsApp:** +923352177766
+1.  **Clone the Repository:** `git clone [Your Repository URL]`
+2.  **Deployment:** Deploy to an environment that supports dynamic injection of Firebase credentials for full database functionality. The application defaults to anonymous sign-in if the custom token is unavailable.
